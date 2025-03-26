@@ -1,0 +1,127 @@
+import pandas as pd
+from surprise import Dataset, Reader, SVD, accuracy
+from surprise.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+
+# Load sample datasets (replace with your actual datasets)
+customer_data = pd.read_csv('customer_data.csv')  # Customer data
+transaction_data = pd.read_csv('customer_transaction_data.csv')  # Transaction data
+social_media_data = pd.read_csv('social_media_activity_data.csv')  # Social media activity
+demographic_data = pd.read_csv('customer_demographics.csv')  # Demographic data
+
+# Merge transaction data with demographic data
+merged_data = pd.merge(transaction_data, demographic_data, on='customer_id', how='left')
+
+# Handle missing values (if any) - Use forward filling or fill with 0
+merged_data = merged_data.fillna(0)
+
+# Merge social media data with transaction data (optional: based on interests or customer ID)
+merged_data = pd.merge(merged_data, social_media_data, on='customer_id', how='left')
+
+# Check the column names to find the correct column for 'preferences'
+print(merged_data.columns)
+
+# Create preferences based on transaction amount (for simplicity)
+merged_data['preferences'] = merged_data['transaction_amount'].apply(lambda x: 1 if x > 100 else 0)
+
+# Normalize transaction_amount and preferences for better performance
+scaler = StandardScaler()
+merged_data['transaction_amount'] = scaler.fit_transform(merged_data[['transaction_amount']])
+merged_data['preferences'] = scaler.fit_transform(merged_data[['preferences']])
+
+# Encode categorical features (for example, preferences and location)
+le = LabelEncoder()
+merged_data['preferences'] = le.fit_transform(merged_data['preferences'])
+merged_data['location'] = le.fit_transform(merged_data['location'])
+
+# Prepare data for collaborative filtering (using `customer_id` and `product_id`)
+reader = Reader(rating_scale=(0, 5))  # Assuming ratings scale from 0 to 5
+collaborative_data = Dataset.load_from_df(merged_data[['customer_id', 'product_id', 'transaction_amount']], reader)
+trainset, testset = train_test_split(collaborative_data, test_size=0.2)
+
+# Build collaborative filtering model (SVD)
+#svd_model = SVD(n_factors=100, n_epochs=30, lr_all=0.005, reg_all=0.02)
+#svd_model = SVD(n_factors=150, n_epochs=30, lr_all=0.005, reg_all=0.02)
+svd_model = SVD(n_factors=200, n_epochs=40, lr_all=0.005, reg_all=0.02)
+svd_model.fit(trainset)
+
+
+# SVD hyperparameters tuning
+svd_model.fit(trainset)
+
+# Predictions for collaborative filtering (SVD)
+collaborative_preds = svd_model.test(testset)
+collaborative_rmse = accuracy.rmse(collaborative_preds)
+print(f"Collaborative Filtering RMSE: {collaborative_rmse}")
+
+# Content-based filtering using similarity of product features (using transaction data and social media activity)
+product_features = merged_data[['product_id', 'preferences', 'transaction_amount']]
+
+# Drop duplicates and handle missing values before calculating similarity
+product_features = product_features.drop_duplicates().fillna(0)
+
+# Ensure product ID exists in the product features
+print("Available product IDs in product_features:", product_features['product_id'].unique())
+
+# Calculate similarity matrix based on preferences (you could include other features)
+cosine_sim = cosine_similarity(product_features[['preferences', 'transaction_amount']])
+
+print(transaction_data[transaction_data['product_id'] == 14])
+
+# Function to get top N similar products for a given product
+def get_similar_products(product_id, top_n=3):
+    # Check if the product_id exists in product_features
+    if product_id not in product_features['product_id'].values:
+        print(f"Product ID {product_id} not found in the product features.")
+        return []  # Return empty list if the product is not found
+
+    # Find the index of the product in the features DataFrame
+    product_index = product_features[product_features['product_id'] == product_id].index[0]
+
+    # Get similarity scores for the product
+    similarity_scores = list(enumerate(cosine_sim[product_index]))
+    similarity_scores = sorted(similarity_scores, key=lambda x: x[1], reverse=True)
+
+    # Get the top 'n' similar products (skip the first product because it's the same as the input product)
+    similar_products = [product_features.iloc[i[0]]['product_id'] for i in similarity_scores[1:top_n+1]]
+
+    return similar_products
+
+# Example usage: Get top 3 similar products for product 14
+similar_products = get_similar_products(14, top_n=3)
+print(f"Top 3 similar products to product 14: {similar_products}")
+
+# Hybrid model: Combine collaborative and content-based results
+def hybrid_recommendation(user_id, product_id, top_n=3):
+    # Collaborative filtering (SVD)
+    collaborative_pred = svd_model.predict(user_id, product_id).est
+
+    # Content-based filtering (similarity)
+    similar_products = get_similar_products(product_id, top_n=top_n)
+
+    # Check if any similar products were found
+    if not similar_products:
+        print(f"No similar products found for product ID {product_id}")
+        return []
+
+    content_based_scores = [svd_model.predict(user_id, p).est for p in similar_products]
+
+    # Hybrid score: Combine collaborative and content-based scores (weighted average)
+    hybrid_scores = [0.7 * collaborative_pred + 0.3 * content_based_score for content_based_score in content_based_scores]
+
+    # Get the top N recommendations based on hybrid score
+    top_recommendations = sorted(zip(similar_products, hybrid_scores), key=lambda x: x[1], reverse=True)[:top_n]
+
+    return top_recommendations
+
+# Example: Get top 3 hybrid recommendations for user 1, product 14
+user_id = 24
+product_id = 14
+top_n_recs = hybrid_recommendation(user_id, product_id, top_n=3)
+
+# Print hybrid recommendations
+print(f"\nTop 3 Hybrid Recommendations for User {user_id} and Product {product_id}:")
+for rec in top_n_recs:
+    print(f"Product ID: {rec[0]}, Predicted Rating: {rec[1]:.2f}")
